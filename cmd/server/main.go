@@ -58,7 +58,7 @@ func main() {
 	// Build DSN for Postgres
 	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s", settings.DBUser, settings.DBPassword, settings.DBHost, settings.DBPort, settings.DBName)
 
-	// Init S3 client for MinIO (non-deprecated approach)
+	// Init S3 client (communicate to MinIO locally)
 	awsCfg, err := awsconfig.LoadDefaultConfig(
 		ctx,
 		awsconfig.WithRegion(settings.S3Region),
@@ -94,11 +94,12 @@ func main() {
 	}
 }
 
-// createRunsHandler accepts an array of runs, uploads a batch JSON to S3, and stores S3 refs in Postgres.
+// createRunsHandler accepts a payload of runs, uploads a batch JSON to S3 for large fields, and stores S3 refs in Postgres.
 func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	ctx := r.Context()
 
+	// Parse runs. NOTE: feel free to change the format of the payload
 	var runs []RunIn
 	if err := json.NewDecoder(r.Body).Decode(&runs); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
