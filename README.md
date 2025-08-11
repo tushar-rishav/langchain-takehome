@@ -131,14 +131,3 @@ make format
 # Basic linting (go vet)
 make lint
 ```
-
-## API Documentation
-
-This starter does not include Swagger/ReDoc. Use the examples below to exercise endpoints.
-
-## Testing
-
-No tests are included yet. Add tests under `./...` and run with:
-```bash
-go test ./...
-```
