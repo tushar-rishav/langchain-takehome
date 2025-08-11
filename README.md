@@ -1,6 +1,6 @@
 # ls-go-run-handler
 
-An interview starter Go server with endpoints for ingesting and fetching runs.
+An starter Go server with endpoints for ingesting and fetching runs.
 
 ## Features
 
@@ -21,7 +21,12 @@ brew install golang-migrate
 # 3) Run DB migrations
 make db-migrate
 
-# 4) Run the server
+# 4) Install dependencies
+make deps
+# or
+# go mod tidy
+
+# 5) Run the server
 make server
 # or
 # go run ./cmd/server
@@ -104,22 +109,6 @@ make db-migrate
 make db-downgrade
 ```
 
-Configuration:
-- Default DB URL: `postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable`
-- Override via `DB_URL` variable, e.g.:
-  ```bash
-  make db-migrate DB_URL="postgres://user:pass@localhost:5432/mydb?sslmode=disable"
-  ```
-
-Alternative migrations via Docker (no local install):
-```bash
-docker run --rm \
-  -v "$(pwd)/migrations:/migrations" \
-  --network host \
-  migrate/migrate \
-  -path=/migrations -database "$DB_URL" up
-```
-
 ## Running the Server
 
 ```bash
@@ -129,7 +118,7 @@ make server
 # Or manually start the server
 go run ./cmd/server
 
-# Use a custom port
+# Use a custom port (likely not needed)
 PORT=8080 go run ./cmd/server
 ```
 
@@ -168,9 +157,3 @@ go test ./...
 ├── Makefile                # common dev tasks
 └── go.mod                  # module definition
 ```
-
-Notes:
-- Endpoints implemented with mock responses for now:
-  - POST /runs
-  - GET /runs/{id}
-- MinIO is included for parity with the Python version but unused by the Go code currently.
