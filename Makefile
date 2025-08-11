@@ -1,4 +1,4 @@
-.PHONY: db-up db-down db-migrate db-downgrade server format lint deps
+.PHONY: db-up db-down db-migrate db-downgrade server format lint deps test test-setup db-migrate-test
 
 # Configuration
 DB_URL ?= postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
@@ -56,3 +56,7 @@ test-setup:
 	@echo "5. Running migrations on test database..."
 	make db-migrate-test
 	@echo "Test environment setup complete!"
+
+# Run tests with test environment
+test: test-setup
+	RUN_HANDLER_ENV=test go test ./...

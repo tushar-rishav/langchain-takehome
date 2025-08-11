@@ -18,7 +18,7 @@ import (
     "github.com/aws/aws-sdk-go-v2/service/s3"
     "github.com/go-chi/chi/v5"
     "github.com/google/uuid"
-    "github.com/jackc/pgx/v5/pgxpool"
+    "github.com/jackc/pgx/v5"
 
     appconfig "github.com/langchain-ai/ls-go-run-handler/internal/config"
 )
@@ -45,7 +45,7 @@ type runJSON struct {
 
 type Server struct {
     cfg  appconfig.Settings
-    pool *pgxpool.Pool
+    dsn  string
     s3   *s3.Client
 }
 
@@ -55,12 +55,8 @@ func main() {
     // Load settings
     settings := appconfig.Load()
 
-    // Init pgx pool
+    // Build DSN for Postgres
     dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s", settings.DBUser, settings.DBPassword, settings.DBHost, settings.DBPort, settings.DBName)
-    pool, err := pgxpool.New(ctx, dsn)
-    if err != nil {
-        log.Fatalf("failed to create pgx pool: %v", err)
-    }
 
     // Init S3 client for MinIO (non-deprecated approach)
     awsCfg, err := awsconfig.LoadDefaultConfig(
@@ -76,7 +72,7 @@ func main() {
         o.BaseEndpoint = aws.String(settings.S3Endpoint)
     })
 
-    srv := &Server{cfg: settings, pool: pool, s3: s3Client}
+    srv := &Server{cfg: settings, dsn: dsn, s3: s3Client}
 
     r := chi.NewRouter()
     r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -206,10 +202,19 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
     }
 
     // Insert references into Postgres
+    conn, err := pgx.Connect(ctx, s.dsn)
+    if err != nil {
+        log.Printf("db connect error: %v", err)
+        w.WriteHeader(http.StatusInternalServerError)
+        _ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to connect to database"})
+        return
+    }
+    defer conn.Close(ctx)
+
     runIDs := make([]string, 0, len(offs))
     for _, ro := range offs {
         var outID uuid.UUID
-        err := s.pool.QueryRow(ctx,
+        err := conn.QueryRow(ctx,
             `INSERT INTO runs (id, trace_id, name, inputs, outputs, metadata)
              VALUES ($1, $2, $3, $4, $5, $6)
              RETURNING id`,
@@ -249,7 +254,14 @@ func (s *Server) getRunHandler(w http.ResponseWriter, r *http.Request) {
         outputsRef string
         metadataRef string
     )
-    err = s.pool.QueryRow(ctx,
+    conn, err := pgx.Connect(ctx, s.dsn)
+    if err != nil {
+        w.WriteHeader(http.StatusInternalServerError)
+        _ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to connect to database"})
+        return
+    }
+    defer conn.Close(ctx)
+    err = conn.QueryRow(ctx,
         `SELECT id, trace_id, name, COALESCE(inputs, ''), COALESCE(outputs, ''), COALESCE(metadata, '')
          FROM runs WHERE id = $1`, id,
     ).Scan(&outID, &traceID, &name, &inputsRef, &outputsRef, &metadataRef)
