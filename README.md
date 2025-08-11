@@ -142,18 +142,3 @@ No tests are included yet. Add tests under `./...` and run with:
 ```bash
 go test ./...
 ```
-
-## Project Structure
-
-```
-.
-├── cmd
-│   └── server
-│       └── main.go         # chi-based HTTP server with mock endpoints
-├── migrations              # golang-migrate SQL migrations
-│   ├── 0001_create_runs_table.up.sql
-│   └── 0001_create_runs_table.down.sql
-├── docker-compose-db.yaml  # Postgres + MinIO services
-├── Makefile                # common dev tasks
-└── go.mod                  # module definition
-```
