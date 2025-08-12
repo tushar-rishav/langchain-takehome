@@ -1,6 +1,6 @@
 # ls-go-run-handler
 
-An starter Go server with endpoints for ingesting and fetching runs.
+A starter Go server with endpoints for ingesting and fetching runs.
 
 ## Features
 
