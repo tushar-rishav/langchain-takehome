@@ -133,3 +133,74 @@ make format
 # Basic linting (go vet)
 make lint
 ```
+
+## Testing
+
+The project uses Go's built-in testing package and includes a dedicated test environment configuration.
+
+Run tests (this automatically sets up the test environment):
+
+```bash
+make test
+```
+
+The test command will:
+
+- Set up a clean test environment (drop and recreate the test database and S3 bucket)
+- Run migrations on the test database
+- Execute all tests with the test environment settings
+
+### Test Environment Setup
+
+The test environment uses:
+
+- A separate database: `postgres_test`
+- A separate S3 bucket: `runs-test`
+- Environment variables from `.env.test` (or sensible defaults if the file is missing)
+
+You can manually set up the test environment without running tests:
+
+```bash
+make test-setup
+```
+
+### Environment Configuration
+
+The application uses environment-specific configuration:
+
+- Development: Uses the default `.env` file
+- Testing: Uses the `.env.test` file when `RUN_HANDLER_ENV=test` is set
+
+The Makefile targets for tests and benchmarks set `RUN_HANDLER_ENV=test` automatically so tests run with isolated resources without affecting your development environment.
+
+## Benchmarking and Profiling
+
+The project includes tools for performance benchmarking and memory allocation profiling to help identify bottlenecks and optimize resource usage.
+
+### Performance Benchmarks
+
+Performance benchmarks measure execution time of key operations using Go's `testing` benchmarks. The benchmarks are designed to isolate HTTP request handling from data preparation; large request bodies are generated once outside the timed loop.
+
+Run performance benchmarks:
+
+```bash
+make bench
+```
+
+This will:
+
+- Set up a clean test environment
+- Run the benchmark tests with `-benchmem` to report memory allocations
+
+Example benchmark scenarios (as currently configured):
+
+- Processing 500 runs with 100KB of data per field (inputs/outputs/metadata)
+- Processing 50 runs with 1000KB (1MB) of data per field
+
+You can adjust scenarios by editing `cmd/server/bench_test.go`.
+
+Tip: To run benchmarks directly without Make:
+
+```bash
+RUN_HANDLER_ENV=test go test -bench=. -benchmem -run='^$' ./...
+```
