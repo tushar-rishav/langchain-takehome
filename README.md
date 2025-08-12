@@ -9,8 +9,10 @@ An starter Go server with endpoints for ingesting and fetching runs.
 
 ## Quick Start
 
+Ensure you have [Docker](https://docker.com) and  [Go](https://go.dev) installed.
+
 ```bash
-# 1) Start local Postgres (and MinIO, though it's not used yet)
+# 1) Start local Postgres and MinIO services (uses docker-compose-db.yaml)
 make db-up
 
 # 2) Install golang-migrate CLI (macOS)
@@ -26,10 +28,10 @@ make deps
 # or
 # go mod tidy
 
-# 5) Run the server
+# 5) Run the server, creating the `runs` bucket if needed.
 make server
 # or
-# go run ./cmd/server
+# go run ./cmd/server  # <-- this will FAIL on requests if the `runs` bucket doesn't exist
 ```
 
 The API will be available at http://localhost:8000

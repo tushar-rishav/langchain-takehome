@@ -21,13 +21,9 @@ import (
 )
 
 // helper to construct a server instance and router using test env settings
-func newTestRouter(t *testing.T) (*chi.Mux, *Server) {
-	t.Helper()
+func newTestRouter(tb testing.TB) (*chi.Mux, *Server) {
+	tb.Helper()
 
-	// Ensure test env variables are loaded
-	if err := os.Setenv("RUN_HANDLER_ENV", "test"); err != nil {
-		t.Fatalf("failed to set RUN_HANDLER_ENV: %v", err)
-	}
 	// Provide sensible defaults if .env.test isn't present
 	if os.Getenv("DB_NAME") == "" {
 		_ = os.Setenv("DB_NAME", "postgres_test")
@@ -48,7 +44,7 @@ func newTestRouter(t *testing.T) (*chi.Mux, *Server) {
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(cfg.S3AccessKey, cfg.S3SecretKey, "")),
 	)
 	if err != nil {
-		t.Fatalf("failed to load AWS config: %v", err)
+		tb.Fatalf("failed to load AWS config: %v", err)
 	}
 	s3Client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		o.UsePathStyle = true

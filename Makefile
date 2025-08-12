@@ -1,4 +1,4 @@
-.PHONY: db-up db-down db-migrate db-downgrade server format lint deps test test-setup db-migrate-test
+.PHONY: db-up db-down db-migrate db-downgrade server format lint deps test test-setup db-migrate-test bench
 
 # Configuration
 DB_URL ?= postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
@@ -60,3 +60,7 @@ test-setup:
 # Run tests with test environment
 test: test-setup
 	RUN_HANDLER_ENV=test go test ./...
+
+# Run benchmarks with test environment (memory allocations reported)
+bench: test-setup
+	RUN_HANDLER_ENV=test go test -bench=. -benchmem -run=^$$ ./...
