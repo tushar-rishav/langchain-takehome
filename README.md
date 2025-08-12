@@ -28,10 +28,12 @@ make deps
 # or
 # go mod tidy
 
-# 5) Run the server, creating the `runs` bucket if needed.
+# 5) Run the server (this ensures the `runs` bucket exists first)
 make server
-# or
-# go run ./cmd/server  # <-- this will FAIL on requests if the `runs` bucket doesn't exist
+# or, if you want to only create the bucket without starting the server
+make server-setup
+# or, run server directly (will fail on requests if the `runs` bucket doesn't exist)
+# go run ./cmd/server
 ```
 
 The API will be available at http://localhost:8000
@@ -128,7 +130,7 @@ PORT=8080 go run ./cmd/server
 
 ```bash
 # Format code (gofmt)
-make format
+make fmt
 
 # Basic linting (go vet)
 make lint

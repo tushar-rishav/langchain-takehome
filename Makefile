@@ -1,4 +1,4 @@
-.PHONY: db-up db-down db-migrate db-downgrade server format lint deps test test-setup db-migrate-test bench
+.PHONY: db-up db-down db-migrate db-downgrade server server-setup format lint deps test test-setup db-migrate-test bench
 
 # Configuration
 DB_URL ?= postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
@@ -29,8 +29,15 @@ db-migrate-test:
 db-downgrade:
 	migrate -path $(MIGRATIONS_DIR) -database "$(DB_URL)" down 1
 
-# Run the Go server locally
-server:
+# Ensure MinIO bucket exists for the server (idempotent)
+server-setup:
+	@echo "Ensuring S3 alias is configured in MinIO container..."
+	-docker exec -i ls-go-run-handler-minio-1 mc alias set local http://localhost:9000 minioadmin1 minioadmin1
+	@echo "Creating 'runs' bucket if missing..."
+	-docker exec -i ls-go-run-handler-minio-1 mc mb --ignore-existing local/runs
+
+# Run the Go server locally (ensures bucket exists first)
+server: db-migrate server-setup
 	go run ./cmd/server
 
 # Format the codebase

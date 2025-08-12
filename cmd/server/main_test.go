@@ -24,16 +24,13 @@ import (
 func newTestRouter(tb testing.TB) (*chi.Mux, *Server) {
 	tb.Helper()
 
+	// assert RUN_HANDLER_ENV=test
+	env := os.Getenv("RUN_HANDLER_ENV")
+	if env != "test" {
+		tb.Fatalf("expected RUN_HANDLER_ENV=test, got %s", env)
+	}
+
 	// Provide sensible defaults if .env.test isn't present
-	if os.Getenv("DB_NAME") == "" {
-		_ = os.Setenv("DB_NAME", "postgres_test")
-	}
-	if os.Getenv("S3_BUCKET_NAME") == "" {
-		_ = os.Setenv("S3_BUCKET_NAME", "runs-test")
-	}
-	if os.Getenv("S3_ENDPOINT_URL") == "" {
-		_ = os.Setenv("S3_ENDPOINT_URL", "http://localhost:9000")
-	}
 	cfg := appconfig.Load()
 
 	// Build S3 client matching main.go

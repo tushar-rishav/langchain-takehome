@@ -6,7 +6,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// Settings mirrors the Python Settings, with sane defaults and env overrides.
+// Settings represents the application settings
 type Settings struct {
 	AppTitle       string
 	AppDescription string
@@ -54,7 +54,7 @@ func Load() Settings {
 		DBName:     get("DB_NAME", "postgres"),
 
 		S3BucketName: get("S3_BUCKET_NAME", "runs"),
-		S3Endpoint:   get("S3_ENDPOINT_URL", "http://localhost:9002"),
+		S3Endpoint:   get("S3_ENDPOINT_URL", "http://localhost:9000"),
 		S3AccessKey:  get("S3_ACCESS_KEY", "minioadmin1"),
 		S3SecretKey:  get("S3_SECRET_KEY", "minioadmin1"),
 		S3Region:     get("S3_REGION", "us-east-1"),
