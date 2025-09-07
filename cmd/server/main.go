@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -47,6 +48,13 @@ type Server struct {
 	cfg appconfig.Settings
 	dsn string
 	s3  *s3.Client
+}
+
+// bufferPool is used to reuse buffers for batch JSON construction
+var bufferPool = sync.Pool{
+	New: func() any {
+		return new(bytes.Buffer)
+	},
 }
 
 func main() {
@@ -124,7 +132,8 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 		metadataRef string
 	}
 
-	buf := &bytes.Buffer{}
+	buf := bufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
 	buf.WriteByte('[')
 	offs := make([]runOffsets, 0, len(runs))
 
@@ -187,6 +196,8 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	buf.WriteByte(']')
+	// Return buffer to pool after use
+	defer bufferPool.Put(buf)
 
 	// Upload batch JSON
 	_, err := s.s3.PutObject(ctx, &s3.PutObjectInput{
