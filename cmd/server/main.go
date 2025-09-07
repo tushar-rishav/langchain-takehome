@@ -166,40 +166,47 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Marshal nested fields first to preserve bytes
-		inputsBytes, _ := json.Marshal(in.Inputs)
-		outputsBytes, _ := json.Marshal(in.Outputs)
-		metadataBytes, _ := json.Marshal(in.Metadata)
-		rj := runJSON{ID: id, TraceID: traceID, Name: in.Name, Inputs: inputsBytes, Outputs: outputsBytes, Metadata: metadataBytes}
-		runBytes, err := json.Marshal(rj)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to encode run"})
-			return
-		}
 		if i > 0 {
 			buf.WriteByte(',')
 		}
-		runStart := buf.Len()
-		buf.Write(runBytes)
+		buf.WriteString(`{"id":"`)
+		buf.WriteString(id.String())
+		buf.WriteString(`","trace_id":"`)
+		buf.WriteString(traceID.String())
+		buf.WriteString(`","name":`)
+		nameBytes, _ := json.Marshal(in.Name)
+		buf.Write(nameBytes)
 
-		mkRef := func(field string, fieldBytes []byte) string {
-			idx := bytes.Index(runBytes, fieldBytes)
-			if idx == -1 {
-				return ""
-			}
-			start := runStart + idx
-			end := start + len(fieldBytes)
-			return fmt.Sprintf("s3://%s/%s#%d:%d/%s", s.cfg.S3BucketName, objectKey, start, end, field)
-		}
+		// inputs
+		inputsBytes, _ := json.Marshal(in.Inputs)
+		inputsStart := buf.Len() + len(`,"inputs":`)
+		buf.WriteString(`,"inputs":`)
+		buf.Write(inputsBytes)
+		inputsEnd := buf.Len()
+
+		// outputs
+		outputsBytes, _ := json.Marshal(in.Outputs)
+		outputsStart := buf.Len() + len(`,"outputs":`)
+		buf.WriteString(`,"outputs":`)
+		buf.Write(outputsBytes)
+		outputsEnd := buf.Len()
+
+		// metadata
+		metadataBytes, _ := json.Marshal(in.Metadata)
+		metadataStart := buf.Len() + len(`,"metadata":`)
+		buf.WriteString(`,"metadata":`)
+		buf.Write(metadataBytes)
+		metadataEnd := buf.Len()
+
+		buf.WriteByte('}')
 
 		offs = append(offs, runOffsets{
 			id:          id,
 			traceID:     traceID,
 			name:        in.Name,
-			inputsRef:   mkRef("inputs", inputsBytes),
-			outputsRef:  mkRef("outputs", outputsBytes),
-			metadataRef: mkRef("metadata", metadataBytes),
+			inputsRef:   fmt.Sprintf("s3://%s/%s#%d:%d/inputs", s.cfg.S3BucketName, objectKey, inputsStart, inputsEnd),
+			outputsRef:  fmt.Sprintf("s3://%s/%s#%d:%d/outputs", s.cfg.S3BucketName, objectKey, outputsStart, outputsEnd),
+			metadataRef: fmt.Sprintf("s3://%s/%s#%d:%d/metadata", s.cfg.S3BucketName, objectKey, metadataStart, metadataEnd),
 		})
 	}
 	buf.WriteByte(']')
