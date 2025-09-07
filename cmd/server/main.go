@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/goccy/go-json"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -174,28 +175,24 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 		buf.WriteString(`","trace_id":"`)
 		buf.WriteString(traceID.String())
 		buf.WriteString(`","name":`)
-		nameBytes, _ := json.Marshal(in.Name)
-		buf.Write(nameBytes)
+		json.NewEncoder(buf).Encode(in.Name)
 
 		// inputs
-		inputsBytes, _ := json.Marshal(in.Inputs)
-		inputsStart := buf.Len() + len(`,"inputs":`)
 		buf.WriteString(`,"inputs":`)
-		buf.Write(inputsBytes)
+		inputsStart := buf.Len()
+		json.NewEncoder(buf).Encode(in.Inputs)
 		inputsEnd := buf.Len()
 
 		// outputs
-		outputsBytes, _ := json.Marshal(in.Outputs)
-		outputsStart := buf.Len() + len(`,"outputs":`)
 		buf.WriteString(`,"outputs":`)
-		buf.Write(outputsBytes)
+		outputsStart := buf.Len()
+		json.NewEncoder(buf).Encode(in.Outputs)
 		outputsEnd := buf.Len()
 
 		// metadata
-		metadataBytes, _ := json.Marshal(in.Metadata)
-		metadataStart := buf.Len() + len(`,"metadata":`)
 		buf.WriteString(`,"metadata":`)
-		buf.Write(metadataBytes)
+		metadataStart := buf.Len()
+		json.NewEncoder(buf).Encode(in.Metadata)
 		metadataEnd := buf.Len()
 
 		buf.WriteByte('}')
