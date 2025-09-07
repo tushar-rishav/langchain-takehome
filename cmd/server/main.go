@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	appconfig "github.com/langchain-ai/ls-go-run-handler/internal/config"
@@ -203,7 +204,8 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	buf.WriteByte(']')
 	// Return buffer to pool after use
-	defer bufferPool.Put(buf)
+	bufReader := bytes.NewReader(buf.Bytes())
+	bufferPool.Put(buf)
 
 	errCh := make(chan error, 2)
 	runIDsCh := make(chan []string, 1)
@@ -213,7 +215,7 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 		_, err := s.s3.PutObject(ctx, &s3.PutObjectInput{
 			Bucket:      aws.String(s.cfg.S3BucketName),
 			Key:         aws.String(objectKey),
-			Body:        bytes.NewReader(buf.Bytes()),
+			Body:        bufReader,
 			ContentType: aws.String("application/json"),
 		})
 		errCh <- err
@@ -228,43 +230,26 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer conn.Release()
+
+		rows := make([][]any, 0, len(offs))
 		runIDs := make([]string, 0, len(offs))
-		tx, err := conn.Begin(ctx)
+		for _, ro := range offs {
+			rows = append(rows, []any{ro.id, ro.traceID, ro.name, ro.inputsRef, ro.outputsRef, ro.metadataRef})
+			runIDs = append(runIDs, ro.id.String())
+		}
+
+		_, err = conn.CopyFrom(
+			ctx,
+			pgx.Identifier{"runs"},
+			[]string{"id", "trace_id", "name", "inputs", "outputs", "metadata"},
+			pgx.CopyFromRows(rows),
+		)
 		if err != nil {
 			errCh <- err
 			runIDsCh <- nil
 			return
 		}
-		defer tx.Rollback(ctx)
-		// Build multi-row INSERT
-		valueStrings := make([]string, 0, len(offs))
-		valueArgs := make([]any, 0, len(offs)*6)
-		for i, ro := range offs {
-			valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d)", i*6+1, i*6+2, i*6+3, i*6+4, i*6+5, i*6+6))
-			valueArgs = append(valueArgs, ro.id, ro.traceID, ro.name, ro.inputsRef, ro.outputsRef, ro.metadataRef)
-		}
-		insertSQL := fmt.Sprintf(`INSERT INTO runs (id, trace_id, name, inputs, outputs, metadata) VALUES %s RETURNING id`, strings.Join(valueStrings, ","))
-		rows, err := tx.Query(ctx, insertSQL, valueArgs...)
-		if err != nil {
-			errCh <- err
-			runIDsCh <- nil
-			return
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var outID uuid.UUID
-			if err := rows.Scan(&outID); err != nil {
-				errCh <- err
-				runIDsCh <- nil
-				return
-			}
-			runIDs = append(runIDs, outID.String())
-		}
-		if err := tx.Commit(ctx); err != nil {
-			errCh <- err
-			runIDsCh <- nil
-			return
-		}
+
 		errCh <- nil
 		runIDsCh <- runIDs
 	}()
