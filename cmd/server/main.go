@@ -60,6 +60,9 @@ var bufferPool = sync.Pool{
 	},
 }
 
+// copyBufPool provides reusable fixed-size buffers for io.CopyBuffer during streaming.
+var copyBufPool = sync.Pool{New: func() any { b := make([]byte, 32*1024); return &b }}
+
 func main() {
 	ctx := context.Background()
 
@@ -295,7 +298,6 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getRunHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	ctx := r.Context()
-
 	idStr := chi.URLParam(r, "id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
@@ -303,6 +305,14 @@ func (s *Server) getRunHandler(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "id must be a valid UUID"})
 		return
 	}
+
+	conn, err := s.db.Acquire(ctx)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to acquire database connection"})
+		return
+	}
+	defer conn.Release()
 
 	var (
 		outID       uuid.UUID
@@ -312,16 +322,9 @@ func (s *Server) getRunHandler(w http.ResponseWriter, r *http.Request) {
 		outputsRef  string
 		metadataRef string
 	)
-	conn, err := s.db.Acquire(ctx)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to acquire database connection"})
-		return
-	}
-	defer conn.Release()
 	err = conn.QueryRow(ctx,
 		`SELECT id, trace_id, name, COALESCE(inputs, ''), COALESCE(outputs, ''), COALESCE(metadata, '')
-         FROM runs WHERE id = $1`, id,
+		 FROM runs WHERE id = $1`, id,
 	).Scan(&outID, &traceID, &name, &inputsRef, &outputsRef, &metadataRef)
 	if err != nil {
 		// Not found or other error
@@ -330,34 +333,56 @@ func (s *Server) getRunHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var (
-		inputs, outputs, metadata map[string]any
-		wg                        sync.WaitGroup
-	)
-	wg.Add(3)
-	go func() {
-		defer wg.Done()
-		inputs = s.fetchFromS3(ctx, inputsRef)
-	}()
-	go func() {
-		defer wg.Done()
-		outputs = s.fetchFromS3(ctx, outputsRef)
-	}()
-	go func() {
-		defer wg.Done()
-		metadata = s.fetchFromS3(ctx, metadataRef)
-	}()
-	wg.Wait()
+	fields := []struct {
+		key string
+		ref string
+	}{
+		{"inputs", inputsRef},
+		{"outputs", outputsRef},
+		{"metadata", metadataRef},
+	}
+	type stream struct {
+		key   string
+		ref   string
+		body  io.ReadCloser
+		errCh <-chan error
+	}
+	streams := make([]stream, 0, len(fields))
+	for _, f := range fields {
+		rc, errCh := s.openS3RangePipe(ctx, f.ref)
+		streams = append(streams, stream{key: f.key, ref: f.ref, body: rc, errCh: errCh})
+	}
 
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"id":       outID.String(),
-		"trace_id": traceID.String(),
-		"name":     name,
-		"inputs":   inputs,
-		"outputs":  outputs,
-		"metadata": metadata,
-	})
+
+	writeField := func(prefix string, st stream) {
+		_, _ = w.Write([]byte(prefix)) // static JSON
+		if st.body == nil {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		bufPtr := copyBufPool.Get().(*[]byte)
+		copyBuf := *bufPtr
+		_, copyErr := io.CopyBuffer(w, st.body, copyBuf)
+		copyBufPool.Put(bufPtr)
+		closeErr := st.body.Close()
+		err := <-st.errCh
+		if copyErr != nil || closeErr != nil || err != nil {
+			log.Printf("stream field %s errors: copy=%v close=%v fetch=%v", st.key, copyErr, closeErr, err)
+			// fallback empty object if error (optional)
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+	}
+
+	_, _ = w.Write([]byte(`{"id":"` + outID.String() + `","trace_id":"` + traceID.String() + `","name":`))
+	nameBuf, _ := json.Marshal(name)
+	_, _ = w.Write(nameBuf)
+
+	writeField(`,"inputs":`, streams[0])
+	writeField(`,"outputs":`, streams[1])
+	writeField(`,"metadata":`, streams[2])
+	_, _ = w.Write([]byte(`}`))
 }
 
 // parseS3Ref parses refs like s3://bucket/key#start:end/field
@@ -365,7 +390,7 @@ func (s *Server) parseS3Ref(ref string) (bucket, key string, start, end int, ok 
 	if ref == "" || !strings.HasPrefix(ref, "s3://") {
 		return "", "", 0, 0, false
 	}
-	rest := strings.TrimPrefix(ref, "s3://")
+	rest := ref[5:] // skip "s3://"
 	slash := strings.IndexByte(rest, '/')
 	if slash == -1 {
 		return "", "", 0, 0, false
@@ -373,17 +398,16 @@ func (s *Server) parseS3Ref(ref string) (bucket, key string, start, end int, ok 
 	bucket = rest[:slash]
 	keyAndFrag := rest[slash+1:]
 	key = keyAndFrag
-	if i := strings.IndexByte(keyAndFrag, '#'); i != -1 {
-		key = keyAndFrag[:i]
-		frag := keyAndFrag[i+1:]
+	if hash := strings.IndexByte(keyAndFrag, '#'); hash != -1 {
+		key = keyAndFrag[:hash]
+		frag := keyAndFrag[hash+1:]
 		// frag is like start:end/field
-		if j := strings.IndexByte(frag, '/'); j != -1 {
-			offsets := frag[:j]
-			parts := strings.Split(offsets, ":")
+		if slash2 := strings.IndexByte(frag, '/'); slash2 != -1 {
+			offsets := frag[:slash2]
+			parts := strings.SplitN(offsets, ":", 2)
 			if len(parts) == 2 {
-				s0, e0 := parts[0], parts[1]
-				st, err1 := strconv.Atoi(s0)
-				en, err2 := strconv.Atoi(e0)
+				st, err1 := strconv.Atoi(parts[0])
+				en, err2 := strconv.Atoi(parts[1])
 				if err1 == nil && err2 == nil {
 					start, end, ok = st, en, true
 				}
@@ -393,30 +417,41 @@ func (s *Server) parseS3Ref(ref string) (bucket, key string, start, end int, ok 
 	return
 }
 
-// fetchFromS3 retrieves the JSON fragment using byte range, returns empty object on errors.
-func (s *Server) fetchFromS3(ctx context.Context, ref string) map[string]any {
+// openS3RangePipe returns a ReadCloser that streams the range specified by the ref using an io.Pipe.
+// The returned error channel yields the terminal error (if any) after the copy completes.
+func (s *Server) openS3RangePipe(ctx context.Context, ref string) (io.ReadCloser, <-chan error) {
 	bucket, key, start, end, ok := s.parseS3Ref(ref)
 	if !ok || bucket == "" || key == "" || end <= start {
-		return map[string]any{}
+		return nil, make(chan error, 1) // empty errCh
 	}
 	rng := fmt.Sprintf("bytes=%d-%d", start, end-1)
-	out, err := s.s3.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-		Range:  aws.String(rng),
-	})
-	if err != nil {
-		log.Printf("s3 GetObject error: %v", err)
-		return map[string]any{}
-	}
-	defer out.Body.Close()
-	b, err := io.ReadAll(out.Body)
-	if err != nil {
-		return map[string]any{}
-	}
-	var v map[string]any
-	if err := json.Unmarshal(b, &v); err != nil {
-		return map[string]any{}
-	}
-	return v
+	pr, pw := io.Pipe()
+	errCh := make(chan error, 1)
+	go func() {
+		defer close(errCh)
+		out, err := s.s3.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+			Range:  aws.String(rng),
+		})
+		if err != nil {
+			pw.CloseWithError(err)
+			errCh <- err
+			return
+		}
+		// Ensure body closed
+		defer out.Body.Close()
+		bufPtr := copyBufPool.Get().(*[]byte)
+		copyBuf := *bufPtr
+		_, copyErr := io.CopyBuffer(pw, out.Body, copyBuf)
+		copyBufPool.Put(bufPtr)
+		if copyErr != nil {
+			pw.CloseWithError(copyErr)
+			errCh <- copyErr
+			return
+		}
+		pw.Close()
+		errCh <- nil
+	}()
+	return pr, errCh
 }
