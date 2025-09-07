@@ -19,7 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	appconfig "github.com/langchain-ai/ls-go-run-handler/internal/config"
 )
@@ -48,6 +48,7 @@ type Server struct {
 	cfg appconfig.Settings
 	dsn string
 	s3  *s3.Client
+	db  *pgxpool.Pool
 }
 
 // bufferPool is used to reuse buffers for batch JSON construction
@@ -80,7 +81,12 @@ func main() {
 		o.BaseEndpoint = aws.String(settings.S3Endpoint)
 	})
 
-	srv := &Server{cfg: settings, dsn: dsn, s3: s3Client}
+	dbpool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		log.Fatalf("failed to create db pool: %v", err)
+	}
+	defer dbpool.Close()
+	srv := &Server{cfg: settings, dsn: dsn, s3: s3Client, db: dbpool}
 
 	r := chi.NewRouter()
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -214,14 +220,14 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Insert references into Postgres
-	conn, err := pgx.Connect(ctx, s.dsn)
+	conn, err := s.db.Acquire(ctx)
 	if err != nil {
-		log.Printf("db connect error: %v", err)
+		log.Printf("db acquire error: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to connect to database"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to acquire database connection"})
 		return
 	}
-	defer conn.Close(ctx)
+	defer conn.Release()
 
 	runIDs := make([]string, 0, len(offs))
 	for _, ro := range offs {
@@ -266,13 +272,13 @@ func (s *Server) getRunHandler(w http.ResponseWriter, r *http.Request) {
 		outputsRef  string
 		metadataRef string
 	)
-	conn, err := pgx.Connect(ctx, s.dsn)
+	conn, err := s.db.Acquire(ctx)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to connect to database"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to acquire database connection"})
 		return
 	}
-	defer conn.Close(ctx)
+	defer conn.Release()
 	err = conn.QueryRow(ctx,
 		`SELECT id, trace_id, name, COALESCE(inputs, ''), COALESCE(outputs, ''), COALESCE(metadata, '')
          FROM runs WHERE id = $1`, id,
