@@ -38,8 +38,8 @@ type RunIn struct {
 
 // runJSON is used to produce stable JSON for batch upload while tracking offsets.
 type runJSON struct {
-	ID       uuid.UUID       `json:"id"`
-	TraceID  uuid.UUID       `json:"trace_id"`
+	ID       *string         `json:"id"`
+	TraceID  string          `json:"trace_id"`
 	Name     string          `json:"name"`
 	Inputs   json.RawMessage `json:"inputs"`
 	Outputs  json.RawMessage `json:"outputs"`
@@ -119,7 +119,7 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Parse runs. NOTE: feel free to change the format of the payload
-	var runs []RunIn
+	var runs []runJSON
 	if err := json.NewDecoder(r.Body).Decode(&runs); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON body, expected an array of runs"})
@@ -145,8 +145,21 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 
 	buf := bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
+	defer bufferPool.Put(buf)
+
+	// Optional pre-grow: heuristic total size (tune factor)
+	var est int
+	for _, rj := range runs {
+		est += len(rj.Inputs) + len(rj.Outputs) + len(rj.Metadata) + 256
+	}
+	if est > 0 && est < 64*1024*1024 {
+		buf.Grow(est)
+	}
+
 	buf.WriteByte('[')
 	offs := make([]runOffsets, 0, len(runs))
+
+	quoteBuf := make([]byte, 0, 128)
 
 	for i, in := range runs {
 		// id
@@ -173,29 +186,45 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 		if i > 0 {
 			buf.WriteByte(',')
 		}
+
 		buf.WriteString(`{"id":"`)
 		buf.WriteString(id.String())
 		buf.WriteString(`","trace_id":"`)
 		buf.WriteString(traceID.String())
 		buf.WriteString(`","name":`)
-		json.NewEncoder(buf).Encode(in.Name)
+
+		quoteBuf = strconv.AppendQuote(quoteBuf[:0], in.Name)
+		buf.Write(quoteBuf)
 
 		// inputs
 		buf.WriteString(`,"inputs":`)
 		inputsStart := buf.Len()
-		json.NewEncoder(buf).Encode(in.Inputs)
+		if len(in.Inputs) == 0 {
+			buf.WriteString(`{}`)
+		} else {
+			// RawMessage: write directly (must be valid JSON)
+			buf.Write(in.Inputs)
+		}
 		inputsEnd := buf.Len()
 
 		// outputs
 		buf.WriteString(`,"outputs":`)
 		outputsStart := buf.Len()
-		json.NewEncoder(buf).Encode(in.Outputs)
+		if len(in.Outputs) == 0 {
+			buf.WriteString(`{}`)
+		} else {
+			buf.Write(in.Outputs)
+		}
 		outputsEnd := buf.Len()
 
 		// metadata
 		buf.WriteString(`,"metadata":`)
 		metadataStart := buf.Len()
-		json.NewEncoder(buf).Encode(in.Metadata)
+		if len(in.Metadata) == 0 {
+			buf.WriteString(`{}`)
+		} else {
+			buf.Write(in.Metadata)
+		}
 		metadataEnd := buf.Len()
 
 		buf.WriteByte('}')
@@ -212,7 +241,6 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 	buf.WriteByte(']')
 	// Return buffer to pool after use
 	bufReader := bytes.NewReader(buf.Bytes())
-	bufferPool.Put(buf)
 
 	errCh := make(chan error, 2)
 	runIDsCh := make(chan []string, 1)
