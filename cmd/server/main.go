@@ -205,70 +205,96 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 	// Return buffer to pool after use
 	defer bufferPool.Put(buf)
 
-	// Upload batch JSON
-	_, err := s.s3.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:      aws.String(s.cfg.S3BucketName),
-		Key:         aws.String(objectKey),
-		Body:        bytes.NewReader(buf.Bytes()),
-		ContentType: aws.String("application/json"),
-	})
-	if err != nil {
-		log.Printf("s3 PutObject error: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to upload batch to object storage"})
-		return
-	}
+	errCh := make(chan error, 2)
+	runIDsCh := make(chan []string, 1)
 
-	// Insert references into Postgres
-	conn, err := s.db.Acquire(ctx)
-	if err != nil {
-		log.Printf("db acquire error: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to acquire database connection"})
-		return
-	}
-	defer conn.Release()
+	// S3 upload goroutine
+	go func() {
+		_, err := s.s3.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:      aws.String(s.cfg.S3BucketName),
+			Key:         aws.String(objectKey),
+			Body:        bytes.NewReader(buf.Bytes()),
+			ContentType: aws.String("application/json"),
+		})
+		errCh <- err
+	}()
 
-	runIDs := make([]string, 0, len(offs))
-	tx, err := conn.Begin(ctx)
-	if err != nil {
-		log.Printf("db tx begin error: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to begin transaction"})
-		return
-	}
-	defer tx.Rollback(ctx)
-
-	// Build multi-row INSERT
-	valueStrings := make([]string, 0, len(offs))
-	valueArgs := make([]any, 0, len(offs)*6)
-	for i, ro := range offs {
-		valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d)", i*6+1, i*6+2, i*6+3, i*6+4, i*6+5, i*6+6))
-		valueArgs = append(valueArgs, ro.id, ro.traceID, ro.name, ro.inputsRef, ro.outputsRef, ro.metadataRef)
-	}
-	insertSQL := fmt.Sprintf(`INSERT INTO runs (id, trace_id, name, inputs, outputs, metadata) VALUES %s RETURNING id`, strings.Join(valueStrings, ","))
-	rows, err := tx.Query(ctx, insertSQL, valueArgs...)
-	if err != nil {
-		log.Printf("db batch insert error: %v", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to batch insert runs"})
-		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var outID uuid.UUID
-		if err := rows.Scan(&outID); err != nil {
-			log.Printf("db scan error: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to scan inserted run id"})
+	// DB batch insert goroutine
+	go func() {
+		conn, err := s.db.Acquire(ctx)
+		if err != nil {
+			errCh <- err
+			runIDsCh <- nil
 			return
 		}
-		runIDs = append(runIDs, outID.String())
+		defer conn.Release()
+		runIDs := make([]string, 0, len(offs))
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			errCh <- err
+			runIDsCh <- nil
+			return
+		}
+		defer tx.Rollback(ctx)
+		// Build multi-row INSERT
+		valueStrings := make([]string, 0, len(offs))
+		valueArgs := make([]any, 0, len(offs)*6)
+		for i, ro := range offs {
+			valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d)", i*6+1, i*6+2, i*6+3, i*6+4, i*6+5, i*6+6))
+			valueArgs = append(valueArgs, ro.id, ro.traceID, ro.name, ro.inputsRef, ro.outputsRef, ro.metadataRef)
+		}
+		insertSQL := fmt.Sprintf(`INSERT INTO runs (id, trace_id, name, inputs, outputs, metadata) VALUES %s RETURNING id`, strings.Join(valueStrings, ","))
+		rows, err := tx.Query(ctx, insertSQL, valueArgs...)
+		if err != nil {
+			errCh <- err
+			runIDsCh <- nil
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var outID uuid.UUID
+			if err := rows.Scan(&outID); err != nil {
+				errCh <- err
+				runIDsCh <- nil
+				return
+			}
+			runIDs = append(runIDs, outID.String())
+		}
+		if err := tx.Commit(ctx); err != nil {
+			errCh <- err
+			runIDsCh <- nil
+			return
+		}
+		errCh <- nil
+		runIDsCh <- runIDs
+	}()
+
+	var s3Err, dbErr error
+	var runIDs []string
+	for i := 0; i < 2; i++ {
+		err := <-errCh
+		if err != nil {
+			if s3Err == nil {
+				s3Err = err
+			} else {
+				dbErr = err
+			}
+		}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		log.Printf("db tx commit error: %v", err)
+	if dbErr == nil && s3Err == nil {
+		runIDs = <-runIDsCh
+	}
+
+	if s3Err != nil || dbErr != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to commit transaction"})
+		msg := map[string]string{"error": ""}
+		if s3Err != nil {
+			msg["error"] += "S3 upload failed: " + s3Err.Error() + ". "
+		}
+		if dbErr != nil {
+			msg["error"] += "DB insert failed: " + dbErr.Error()
+		}
+		_ = json.NewEncoder(w).Encode(msg)
 		return
 	}
 
