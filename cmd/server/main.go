@@ -230,21 +230,46 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 	defer conn.Release()
 
 	runIDs := make([]string, 0, len(offs))
-	for _, ro := range offs {
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		log.Printf("db tx begin error: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to begin transaction"})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	// Build multi-row INSERT
+	valueStrings := make([]string, 0, len(offs))
+	valueArgs := make([]any, 0, len(offs)*6)
+	for i, ro := range offs {
+		valueStrings = append(valueStrings, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d,$%d)", i*6+1, i*6+2, i*6+3, i*6+4, i*6+5, i*6+6))
+		valueArgs = append(valueArgs, ro.id, ro.traceID, ro.name, ro.inputsRef, ro.outputsRef, ro.metadataRef)
+	}
+	insertSQL := fmt.Sprintf(`INSERT INTO runs (id, trace_id, name, inputs, outputs, metadata) VALUES %s RETURNING id`, strings.Join(valueStrings, ","))
+	rows, err := tx.Query(ctx, insertSQL, valueArgs...)
+	if err != nil {
+		log.Printf("db batch insert error: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to batch insert runs"})
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
 		var outID uuid.UUID
-		err := conn.QueryRow(ctx,
-			`INSERT INTO runs (id, trace_id, name, inputs, outputs, metadata)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             RETURNING id`,
-			ro.id, ro.traceID, ro.name, ro.inputsRef, ro.outputsRef, ro.metadataRef,
-		).Scan(&outID)
-		if err != nil {
-			log.Printf("db insert error: %v", err)
+		if err := rows.Scan(&outID); err != nil {
+			log.Printf("db scan error: %v", err)
 			w.WriteHeader(http.StatusInternalServerError)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to insert runs"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to scan inserted run id"})
 			return
 		}
 		runIDs = append(runIDs, outID.String())
+	}
+	if err := tx.Commit(ctx); err != nil {
+		log.Printf("db tx commit error: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "failed to commit transaction"})
+		return
 	}
 
 	w.WriteHeader(http.StatusCreated)
