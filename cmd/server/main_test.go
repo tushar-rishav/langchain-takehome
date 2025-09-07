@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	appconfig "github.com/langchain-ai/ls-go-run-handler/internal/config"
 )
@@ -49,7 +50,11 @@ func newTestRouter(tb testing.TB) (*chi.Mux, *Server) {
 	})
 
 	dsn := "postgres://" + cfg.DBUser + ":" + cfg.DBPassword + "@" + cfg.DBHost + ":" + cfg.DBPort + "/" + cfg.DBName
-	srv := &Server{cfg: cfg, dsn: dsn, s3: s3Client}
+	dbpool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		tb.Fatalf("failed to create db pool: %v", err)
+	}
+	srv := &Server{cfg: cfg, dsn: dsn, s3: s3Client, db: dbpool}
 
 	r := chi.NewRouter()
 	r.Post("/runs", srv.createRunsHandler)
@@ -60,9 +65,10 @@ func newTestRouter(tb testing.TB) (*chi.Mux, *Server) {
 }
 
 func TestCreateAndGetRun(t *testing.T) {
-	r, _ := newTestRouter(t)
+	r, srv := newTestRouter(t)
 	ts := httptest.NewServer(r)
 	defer ts.Close()
+	defer srv.db.Close()
 
 	// Prepare runs
 	runs := []map[string]any{
