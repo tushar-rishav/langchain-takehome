@@ -315,9 +315,24 @@ func (s *Server) getRunHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	inputs := s.fetchFromS3(ctx, inputsRef)
-	outputs := s.fetchFromS3(ctx, outputsRef)
-	metadata := s.fetchFromS3(ctx, metadataRef)
+	var (
+		inputs, outputs, metadata map[string]any
+		wg                        sync.WaitGroup
+	)
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		inputs = s.fetchFromS3(ctx, inputsRef)
+	}()
+	go func() {
+		defer wg.Done()
+		outputs = s.fetchFromS3(ctx, outputsRef)
+	}()
+	go func() {
+		defer wg.Done()
+		metadata = s.fetchFromS3(ctx, metadataRef)
+	}()
+	wg.Wait()
 
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{
