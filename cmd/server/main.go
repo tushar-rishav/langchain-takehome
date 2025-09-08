@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/goccy/go-json"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -242,35 +243,48 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 	// Return buffer to pool after use
 	bufReader := bytes.NewReader(buf.Bytes())
 
-	errCh := make(chan error, 2)
-	runIDsCh := make(chan []string, 1)
+	// Replace channel-based concurrency with errgroup
+	var (
+		runIDs []string
+		mu     sync.Mutex
+		s3Err  error
+		dbErr  error
+	)
 
-	// S3 upload goroutine
-	go func() {
+	g := new(errgroup.Group)
+
+	// S3 upload
+	g.Go(func() error {
 		_, err := s.s3.PutObject(ctx, &s3.PutObjectInput{
 			Bucket:      aws.String(s.cfg.S3BucketName),
 			Key:         aws.String(objectKey),
 			Body:        bufReader,
 			ContentType: aws.String("application/json"),
 		})
-		errCh <- err
-	}()
+		if err != nil {
+			mu.Lock()
+			s3Err = fmt.Errorf("s3 upload: %w", err)
+			mu.Unlock()
+		}
+		return nil // swallow to allow DB goroutine to finish
+	})
 
-	// DB batch insert goroutine
-	go func() {
+	// DB batch insert
+	g.Go(func() error {
 		conn, err := s.db.Acquire(ctx)
 		if err != nil {
-			errCh <- err
-			runIDsCh <- nil
-			return
+			mu.Lock()
+			dbErr = fmt.Errorf("db acquire: %w", err)
+			mu.Unlock()
+			return nil
 		}
 		defer conn.Release()
 
 		rows := make([][]any, 0, len(offs))
-		runIDs := make([]string, 0, len(offs))
+		localIDs := make([]string, 0, len(offs))
 		for _, ro := range offs {
 			rows = append(rows, []any{ro.id, ro.traceID, ro.name, ro.inputsRef, ro.outputsRef, ro.metadataRef})
-			runIDs = append(runIDs, ro.id.String())
+			localIDs = append(localIDs, ro.id.String())
 		}
 
 		_, err = conn.CopyFrom(
@@ -280,46 +294,42 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 			pgx.CopyFromRows(rows),
 		)
 		if err != nil {
-			errCh <- err
-			runIDsCh <- nil
-			return
+			mu.Lock()
+			dbErr = fmt.Errorf("db copy: %w", err)
+			mu.Unlock()
+			return nil
 		}
 
-		errCh <- nil
-		runIDsCh <- runIDs
-	}()
+		mu.Lock()
+		runIDs = localIDs
+		mu.Unlock()
+		return nil
+	})
 
-	var s3Err, dbErr error
-	var runIDs []string
-	for i := 0; i < 2; i++ {
-		err := <-errCh
-		if err != nil {
-			if s3Err == nil {
-				s3Err = err
-			} else {
-				dbErr = err
-			}
-		}
-	}
-	if dbErr == nil && s3Err == nil {
-		runIDs = <-runIDsCh
-	}
+	_ = g.Wait()
 
-	if s3Err != nil || dbErr != nil {
+	mu.Lock()
+	se := s3Err
+	de := dbErr
+	ids := runIDs
+	mu.Unlock()
+
+	if se != nil || de != nil {
 		w.WriteHeader(http.StatusInternalServerError)
-		msg := map[string]string{"error": ""}
-		if s3Err != nil {
-			msg["error"] += "S3 upload failed: " + s3Err.Error() + ". "
+		var msg strings.Builder
+		if se != nil {
+			msg.WriteString(se.Error())
+			msg.WriteString(". ")
 		}
-		if dbErr != nil {
-			msg["error"] += "DB insert failed: " + dbErr.Error()
+		if de != nil {
+			msg.WriteString(de.Error())
 		}
-		_ = json.NewEncoder(w).Encode(msg)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": msg.String()})
 		return
 	}
 
 	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(map[string]any{"status": "created", "run_ids": runIDs})
+	_ = json.NewEncoder(w).Encode(map[string]any{"status": "created", "run_ids": ids})
 }
 
 // getRunHandler fetches a run by ID and resolves S3 byte-range refs for inputs/outputs/metadata.
