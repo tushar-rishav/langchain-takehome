@@ -242,8 +242,6 @@ func (s *Server) createRunsHandler(w http.ResponseWriter, r *http.Request) {
 	buf.WriteByte(']')
 	// Return buffer to pool after use
 	bufReader := bytes.NewReader(buf.Bytes())
-
-	// Replace channel-based concurrency with errgroup
 	var (
 		runIDs []string
 		mu     sync.Mutex
